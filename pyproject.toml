@@ -1,0 +1,22 @@
+[project]
+name = "tax-agent"
+version = "0.1.0"
+description = "Evaluation, tracing and cost comparison for a mock year-end tax settlement agent"
+readme = "README.md"
+authors = [
+    { name = "jooniorp" }
+]
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+tax-agent = "tax_agent:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
