@@ -1,2 +1,1 @@
-def main() -> None:
-    print("Hello from tax-agent!")
+"""Tax settlement assistant agent, with evaluation, tracing and cost comparison."""

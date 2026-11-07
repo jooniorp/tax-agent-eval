@@ -7,10 +7,14 @@ authors = [
     { name = "jooniorp" }
 ]
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "langchain-anthropic>=1.7.10",
+    "langgraph>=1.2.20",
+    "python-dotenv>=1.2.4",
+]
 
 [project.scripts]
-tax-agent = "tax_agent:main"
+tax-agent = "tax_agent.cli:main"
 
 [build-system]
 requires = ["hatchling"]
