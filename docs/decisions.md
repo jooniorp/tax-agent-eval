@@ -47,3 +47,14 @@
 - **이유**: 본인이 "일단"으로 정함(잠정). 덧붙일 근거 후보: 문항 3의 LLM-judge는 "답변 모델과 다른 모델로 채점"해야 하는데(`research.md` §4), 한 제공자의 모델 등급을 나눠 쓰면 키 하나로 답변 모델과 채점 모델을 분리할 수 있다. `[본인 확인 필요]`
 - **버린 대안**: OpenAI API(`research.md` §5의 "GPT api or claude api" 중 다른 쪽. 필요해지면 모델 비교 단계에서 다시 검토).
 - **주의**: 이 결정은 모델 비교(마일스톤 5)에서 뒤집힐 수 있다. 그래서 LLM 호출은 한 곳(모델 이름을 설정으로 받는 함수)으로 모은다.
+
+### 2026-11-05 — 기본 모델: Claude Haiku 5.5 (`claude-haiku-5-5`), 설정으로 교체 `[잠정 — 본인 확인 필요]`
+- **결정**: 기본 모델은 `claude-haiku-5-5`. 환경변수 `TAX_AGENT_MODEL`(또는 `.env`)로 바꾼다. 모델 이름을 아는 곳은 `src/tax_agent/llm.py` 한 곳이다.
+- **이유**: 비용 상한(월 5~10만원)과 평가셋 반복 실행. 가격(100만 토큰당 입력/출력, Claude API 참조 문서의 2026-10-06 캐시 기준): Haiku 5.5 $0.10/$0.50(프롬프트 100K 토큰 이하), Sonnet 5.5 $2/$10, Opus 5.5 $4/$20 → Haiku가 Sonnet의 1/20, Opus의 1/40. 프로젝트 범위도 "API 소형 모델 vs 로컬 양자화 모델"이다.
+- **버린 대안**: Sonnet 5.5·Opus 5.5(품질은 더 기대되지만 평가를 반복하기엔 비용이 20~40배). 마일스톤 5 모델 비교에서 상위 모델을 한 번 재 보는 것은 가능하다.
+- **주의**: Haiku가 툴을 3번 연쇄 호출하며 숫자를 그대로 중계하는지는 2026-11-07에 문항 1을 **1회** 실행해 성공을 확인했다(`tax-agent` CLI, 툴 3개를 순서대로 호출, 금액 5,300,000원). 1회 관찰이라 정확도 수치가 아니고, 평가셋(마일스톤 3)에서 반복 측정한다. 중계 실패가 잦으면 이 결정을 다시 본다(근거는 평가 정확도). 가격은 캐시된 값이므로 실제 실행 전에 콘솔에서 재확인한다. Haiku 5.5는 `temperature` 등 기본값이 아닌 샘플링 값을 보내면 400이라서 코드에서 넘기지 않는다.
+
+### 2026-11-05 — 에이전트 그래프: LangGraph `StateGraph`로 직접 구성 (`create_react_agent` 미사용)
+- **결정**: model 노드와 `ToolNode`가 도는 루프를 `StateGraph`로 직접 만든다 (`src/tax_agent/agent.py`).
+- **이유**: ① 설치된 langgraph 1.2.20에서 `create_react_agent`는 deprecated다(소스의 경고: `langchain.agents.create_agent`로 이동). 대체 함수를 쓰려면 `langchain` 패키지를 더 설치해야 한다. ② 직접 만든 그래프는 약 20줄이라 구조가 코드에서 그대로 보인다. ③ `ToolNode`의 기본 설정은 툴이 던진 예외를 다시 던져 실행이 죽는다. `handle_tool_errors=True`로 오류를 모델에게 돌려준다 (`tests/test_agent.py`가 확인).
+- **버린 대안**: `create_react_agent`(deprecated), `langchain.agents.create_agent`(의존성 추가).
