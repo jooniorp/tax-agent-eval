@@ -17,6 +17,7 @@ dependencies = [
 
 [project.scripts]
 tax-agent = "tax_agent.cli:main"
+eval = "tax_agent.evaluation.runner:main"
 
 [build-system]
 requires = ["hatchling"]

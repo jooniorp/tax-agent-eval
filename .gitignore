@@ -8,3 +8,6 @@ models/
 
 # 국세청 원본 PDF (용량 큼, 출처 링크는 docs/research.md)
 docs/sources/*.pdf
+
+# raw eval run results; copy the one quoted in the README under docs/
+evals/results/
