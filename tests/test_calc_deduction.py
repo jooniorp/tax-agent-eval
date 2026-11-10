@@ -23,6 +23,7 @@ def test_nts_official_example():
     assert result.minimum_usage == man(1700)
     assert result.before_limit == man(635)  # forgetting the 25% threshold gives 890
     assert result.deduction == man(530)  # 3M base cap + 2.3M extra for special usage
+    assert (result.base_limit, result.extra_deduction) == (man(300), man(230))
 
 
 def test_usage_below_minimum_gets_nothing():

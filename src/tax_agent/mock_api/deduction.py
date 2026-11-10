@@ -34,7 +34,9 @@ class CardSpending:
 class CardDeduction:
     minimum_usage: int  # 25% of total salary
     before_limit: int  # deductible amount before the cap
-    deduction: int  # final deduction after the cap
+    base_limit: int  # basic cap (3M KRW, or 2.5M above 70M total salary)
+    extra_deduction: int  # amount allowed above the basic cap for market / transit / culture usage
+    deduction: int  # final deduction after the cap (the basic cap part + extra_deduction)
 
 
 def calc_card_deduction(gross_salary: int, spending: CardSpending) -> CardDeduction:
@@ -68,4 +70,4 @@ def calc_card_deduction(gross_salary: int, spending: CardSpending) -> CardDeduct
     extra_limit = 2_000_000 if high_income else 3_000_000
     special = (spending.market * 40 + spending.transit * 40 + spending.culture * 30) // 100
     extra = min(max(before_limit - base_limit, 0), special, extra_limit)
-    return CardDeduction(minimum_usage, before_limit, min(before_limit, base_limit) + extra)
+    return CardDeduction(minimum_usage, before_limit, base_limit, extra, min(before_limit, base_limit) + extra)
