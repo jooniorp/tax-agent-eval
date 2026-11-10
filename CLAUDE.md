@@ -53,3 +53,4 @@
 | `docs/research.md` | 사전 조사(도구 선택, 공제 항목, mock API, 평가 방식) |
 | `docs/decisions.md` | 설계 결정 기록 (ADR 축약형) |
 | `docs/architecture.md` | 구조 설명(손으로 씀) + 모듈 import 그래프(Mermaid). `gen:start`~`gen:end` 사이는 **자동 생성**이라 고치지 않는다 |
+| `evals/dataset.jsonl` | 평가 문항 10개(기대 정답·규칙 검사). `uv run eval`이 실행하고 결과는 `evals/results/`(git 제외)에 쌓인다 |

@@ -17,6 +17,7 @@ LLM 에이전트는 몇 시간이면 만들 수 있지만, 프롬프트·모델�
 uv sync
 cp .env.example .env   # API 키 입력
 uv run tax-agent "올해 카드 소득공제 얼마나 받을 수 있어?" --user user_a
+uv run eval   # 평가셋 10문항 (실제 모델 호출, 1회 약 1센트)
 ```
 
 ## 결과
