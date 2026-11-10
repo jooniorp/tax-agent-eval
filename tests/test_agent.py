@@ -38,7 +38,7 @@ def test_agent_follows_the_tool_sequence_and_returns_the_answer():
     model, messages = run([
         call("get_user_profile", {"user_id": "user_a"}, "1"),
         call("get_card_spending", {"user_id": "user_a", "year": 2025}, "2"),
-        call("calc_deduction", {"item": "card", "gross_salary": 68_000_000, "spending": spending}, "3"),
+        call("calc_deduction", {"item": "card", "gross_salary": 68_000_000, "data": spending}, "3"),
         AIMessage(content="카드 소득공제는 530만원입니다."),
     ])
     tool_messages = [m for m in messages if isinstance(m, ToolMessage)]
@@ -50,17 +50,17 @@ def test_agent_follows_the_tool_sequence_and_returns_the_answer():
 
 def test_tool_errors_go_back_to_the_model_instead_of_crashing():
     _, messages = run([
-        call("calc_deduction", {"item": "medical", "gross_salary": 68_000_000, "spending": {}}, "1"),
-        AIMessage(content="의료비는 아직 지원하지 않습니다."),
+        call("calc_deduction", {"item": "education", "gross_salary": 68_000_000, "data": {}}, "1"),
+        AIMessage(content="교육비는 아직 지원하지 않습니다."),
     ])
     tool_message = next(m for m in messages if isinstance(m, ToolMessage))
     assert tool_message.status == "error" and "unsupported item" in tool_message.content
-    assert messages[-1].text == "의료비는 아직 지원하지 않습니다."
+    assert messages[-1].text == "교육비는 아직 지원하지 않습니다."
 
 
 def test_model_name_priority(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")  # constructing the client makes no request
-    monkeypatch.delenv("TAX_AGENT_MODEL", raising=False)
+    monkeypatch.setenv("TAX_AGENT_MODEL", "")  # empty, not deleted: load_dotenv would refill a deleted one from .env
     assert get_model().model == DEFAULT_MODEL
     monkeypatch.setenv("TAX_AGENT_MODEL", "from-env")
     assert get_model().model == "from-env"

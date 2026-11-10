@@ -23,7 +23,7 @@ def test_main_prints_tool_calls_answer_and_stats(monkeypatch, capsys):
     script = [
         ai(tool_calls=[{"name": "get_user_profile", "args": {"user_id": "user_a"}, "id": "1"}], tokens=(100, 10)),
         ai(tool_calls=[{"name": "get_card_spending", "args": {"user_id": "user_a", "year": 2025}, "id": "2"}], tokens=(150, 10)),
-        ai(tool_calls=[{"name": "calc_deduction", "args": {"item": "card", "gross_salary": 68_000_000, "spending": spending}, "id": "3"}], tokens=(300, 40)),
+        ai(tool_calls=[{"name": "calc_deduction", "args": {"item": "card", "gross_salary": 68_000_000, "data": spending}, "id": "3"}], tokens=(300, 40)),
         ai("카드 소득공제는 530만원입니다.", tokens=(400, 30)),
     ]
     monkeypatch.setattr(cli, "get_model", lambda name=None: ScriptedModel(messages=iter(script)))

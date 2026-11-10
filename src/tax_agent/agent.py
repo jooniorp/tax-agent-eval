@@ -3,7 +3,7 @@
     START -> model --(tool calls?)--> tools -> model ... -> END (final answer)
 """
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.tools import StructuredTool
 from langgraph.graph import START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
@@ -19,9 +19,11 @@ Answer in Korean.
 
 Rules:
 - Never calculate deduction amounts yourself. Get them from the calc_deduction tool.
-- To answer a deduction question: get_user_profile (gross salary), then get_card_spending, then calc_deduction, passing the tool results through unchanged.
-- Use only numbers returned by tools. Never invent amounts. If something you need is missing, say so instead of guessing.
-- Briefly explain how the result came about (for example the 25% minimum usage threshold and the cap).
+- To answer a deduction question: get_user_profile first, then the data tool for the topic (get_card_spending, get_rent_payments or get_medical_expenses), then calc_deduction, passing the tool results through unchanged.
+- If something the rules need is missing (a null in the profile, for example gross_salary, or homeless_household_head for rent), ask the user for it and wait for the answer. Do not call calc_deduction until you have it, and never guess it.
+- Use only numbers returned by tools or given by the user. Never invent amounts.
+- If calc_deduction says the user is not eligible, say so with the reason and do not state any deduction amount.
+- Briefly explain how the result came about, in plain Korean (for example the minimum usage threshold, the 3% threshold or the cap). Do not repeat internal field names such as before_limit.
 - This is a mock demo with fictional data, not tax advice.
 
 The current user's id is {user_id}."""
@@ -47,7 +49,20 @@ def build_agent(source: DataSource, user_id: str, model: BaseChatModel | None = 
     return graph.compile()
 
 
-def ask(agent, question: str) -> list[BaseMessage]:
-    """Run one question. Returns the whole message trail; the last message is the answer."""
-    result = agent.invoke({"messages": [HumanMessage(question)]}, {"recursion_limit": MAX_STEPS})
+def ask(
+    agent, question: str, callbacks: list | None = None, history: list[BaseMessage] | None = None
+) -> list[BaseMessage]:
+    """Run one question. Returns the whole message trail; the last message is the answer.
+
+    `history` is the trail returned by an earlier call, for a follow-up turn.
+    `callbacks` are LangChain callback handlers (for example the tracing one).
+    """
+    config = {"recursion_limit": MAX_STEPS, "callbacks": callbacks or []}
+    result = agent.invoke({"messages": [*(history or []), HumanMessage(question)]}, config)
     return result["messages"]
+
+
+def token_totals(messages: list[BaseMessage]) -> tuple[int, int]:
+    """Total (input, output) tokens over every model call in the trail."""
+    usages = [m.usage_metadata for m in messages if isinstance(m, AIMessage) and m.usage_metadata]
+    return sum(u["input_tokens"] for u in usages), sum(u["output_tokens"] for u in usages)

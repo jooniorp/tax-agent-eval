@@ -9,15 +9,10 @@ import time
 
 from langchain_core.messages import AIMessage, BaseMessage
 
-from tax_agent.agent import ask, build_agent
+from tax_agent import tracing
+from tax_agent.agent import ask, build_agent, token_totals
 from tax_agent.llm import estimate_cost_usd, get_model
 from tax_agent.mock_api.source import MockDataSource
-
-
-def token_totals(messages: list[BaseMessage]) -> tuple[int, int]:
-    """Total (input, output) tokens over every model call in the run."""
-    usages = [m.usage_metadata for m in messages if isinstance(m, AIMessage) and m.usage_metadata]
-    return sum(u["input_tokens"] for u in usages), sum(u["output_tokens"] for u in usages)
 
 
 def tool_trace(messages: list[BaseMessage]) -> list[str]:
@@ -41,8 +36,10 @@ def main(argv: list[str] | None = None) -> None:
     model = get_model(args.model)
     agent = build_agent(MockDataSource(), args.user, model=model)
     started = time.perf_counter()
-    messages = ask(agent, args.question)
+    with tracing.trace("tax-agent", user_id=args.user) as callbacks:
+        messages = ask(agent, args.question, callbacks=callbacks)
     elapsed = time.perf_counter() - started
+    tracing.flush()  # without this a short-lived process can exit before the trace is sent
 
     in_tokens, out_tokens = token_totals(messages)
     cost = estimate_cost_usd(model.model, in_tokens, out_tokens)
@@ -51,4 +48,4 @@ def main(argv: list[str] | None = None) -> None:
     for line in tool_trace(messages):
         print(f"  {line}")
     print(f"\n[answer]\n{messages[-1].text}")
-    print(f"\n[stats] model={model.model} time={elapsed:.1f}s tokens in/out={in_tokens}/{out_tokens} cost={cost_text}")
+    print(f"\n[stats] model={model.model} time={elapsed:.1f}s tokens in/out={in_tokens}/{out_tokens} cost={cost_text} tracing={'on' if tracing.enabled() else 'off'}")

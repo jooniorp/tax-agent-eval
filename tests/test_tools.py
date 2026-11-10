@@ -35,4 +35,26 @@ def test_unknown_user_and_unsupported_item_raise():
     with pytest.raises(KeyError):
         tools["get_card_spending"]("user_a", 2024)
     with pytest.raises(ValueError):
-        tools["calc_deduction"]("medical", 68_000_000, {})
+        tools["calc_deduction"]("education", 68_000_000, {})
+
+
+def test_rent_and_medical_questions_through_the_tools():
+    tools = build_tools(MockDataSource())
+    # rent, eligible: user_j (salary 50M, homeless household head, rent 6M) -> 6M x 17%
+    profile = tools["get_user_profile"]("user_j")
+    rent = tools["get_rent_payments"]("user_j", 2025)
+    data = {**rent, "homeless_household_head": profile["homeless_household_head"]}
+    assert tools["calc_deduction"]("rent", profile["gross_salary"], data)["deduction"] == 1_020_000
+    # rent, not eligible: user_b earns 85M, over the 80M limit
+    profile = tools["get_user_profile"]("user_b")
+    data = {**tools["get_rent_payments"]("user_b", 2025), "homeless_household_head": True}
+    result = tools["calc_deduction"]("rent", profile["gross_salary"], data)
+    assert result == {"eligible": False, "reason": "total_salary_over_80m", "deduction": 0}
+    # medical: user_k (salary 40M, 5M paid for self) -> (5M - 3% of 40M) x 15%
+    profile = tools["get_user_profile"]("user_k")
+    expenses = tools["get_medical_expenses"]("user_k", 2025)
+    assert tools["calc_deduction"]("medical", profile["gross_salary"], expenses)["deduction"] == 570_000
+
+
+def test_missing_salary_is_reported_as_null_not_invented():
+    assert build_tools(MockDataSource())["get_user_profile"]("user_d")["gross_salary"] is None
