@@ -18,9 +18,10 @@ from tax_agent.evaluation.scoring import Run, score_item
 from tax_agent.llm import estimate_cost_usd, get_model
 from tax_agent.mock_api.source import MockDataSource
 
-# Tokens assumed per question for the cost estimate printed before a run. Measured on eval
-# item 1 on 2026-11-07 (4,131-4,157 in, 911-955 out) and rounded up: later prompts are longer.
-EST_TOKENS_PER_TURN = (4_500, 1_000)
+# Tokens assumed per question for the cost estimate printed before a run. Measured on the two
+# full eval runs of 2026-11-10: on average 6.9k in / 0.76-0.80k out per question (an item's
+# input grows with every tool round), rounded up. Re-measure when the prompt or the tools change.
+EST_TOKENS_PER_TURN = (7_000, 800)
 RESULTS_DIR = Path("evals/results")
 
 
