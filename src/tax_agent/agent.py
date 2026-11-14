@@ -1,6 +1,9 @@
 """LangGraph tool-calling agent: a model node and a tool node in a loop.
 
     START -> model --(tool calls?)--> tools -> model ... -> END (final answer)
+
+`build_agent(..., calculator=False)` builds the control used by the eval: the same agent without the
+calc_deduction tool and with the tax rules as text in the prompt, so the model has to calculate itself.
 """
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -10,6 +13,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 
 from tax_agent.datasource import DataSource
 from tax_agent.llm import get_model
+from tax_agent.rules import RULES_TEXT
 from tax_agent.tools import build_tools
 
 MAX_STEPS = 12  # graph steps per question (model + tool calls); caps a runaway loop's cost
@@ -28,12 +32,36 @@ Rules:
 
 The current user's id is {user_id}."""
 
+# The control for the eval: same behaviour rules, but the model calculates with the rules below.
+NO_CALCULATOR_PROMPT = """You are a year-end tax settlement assistant for Korean salaried workers (2025 tax year).
+Answer in Korean.
 
-def build_agent(source: DataSource, user_id: str, model: BaseChatModel | None = None):
-    """Compile the agent graph for one user. `source` is where the data comes from."""
-    tools = [StructuredTool.from_function(f) for f in build_tools(source).values()]
+Rules:
+- There is no calculator tool. Work out the deduction amount yourself with the tax rules below, step by step, and double-check the arithmetic.
+- To answer a deduction question: get_user_profile first, then the data tool for the topic (get_card_spending, get_rent_payments or get_medical_expenses), then calculate.
+- If something the rules need is missing (a null in the profile, for example gross_salary, or homeless_household_head for rent), ask the user for it and wait for the answer. Do not calculate until you have it, and never guess it.
+- Use only numbers returned by tools or given by the user. Never invent amounts.
+- If the user is not eligible, say so with the reason and do not state any deduction amount.
+- Briefly explain how the result came about, in plain Korean (for example the minimum usage threshold, the 3% threshold or the cap). Do not repeat internal field names such as before_limit.
+- This is a mock demo with fictional data, not tax advice.
+
+Tax rules (2025 tax year, amounts in KRW):
+{rules}
+The current user's id is {user_id}."""
+
+
+def build_agent(source: DataSource, user_id: str, model: BaseChatModel | None = None, calculator: bool = True):
+    """Compile the agent graph for one user. `source` is where the data comes from.
+
+    calculator=False builds the no-calculator control (see the module docstring).
+    """
+    available = build_tools(source)
+    if not calculator:
+        available.pop("calc_deduction")
+    tools = [StructuredTool.from_function(f) for f in available.values()]
     llm = (model or get_model()).bind_tools(tools)
-    system = SystemMessage(SYSTEM_PROMPT.format(user_id=user_id))
+    template = SYSTEM_PROMPT if calculator else NO_CALCULATOR_PROMPT
+    system = SystemMessage(template.format(user_id=user_id, rules=RULES_TEXT))
 
     def call_model(state: MessagesState) -> dict:
         return {"messages": [llm.invoke([system, *state["messages"]])]}

@@ -43,13 +43,35 @@ def test_a_crashing_item_is_a_failed_item_not_a_crashed_eval():
 
 def test_report_and_summary_numbers():
     ok = {"id": "a", "kind": "amount", "topic": "card", "seconds": 1.0, "tokens_in": 100, "tokens_out": 10, "error": None,
-          "tool_calls": ["calc_deduction"], "answer": "정답", "answer_ok": True, "rules_ok": True, "passed": True,
-          "answer_detail": "", "checks": []}
+          "variant": "calculator", "tool_calls": ["calc_deduction"], "answer": "정답", "answer_ok": True,
+          "rules_ok": True, "passed": True, "answer_detail": "", "checks": [{"name": "tool_called", "ok": True, "detail": "ok"}]}
     bad = {**ok, "id": "b", "answer_ok": False, "passed": False, "answer_detail": "expected 1; answer has [2]"}
-    summary = runner.summarize([ok, bad])
-    assert (summary["items"], summary["answer_ok"], summary["rules_ok"], summary["passed"]) == (2, 1, 2, 1)
-    report = runner.format_report([ok, bad], "claude-haiku-5-5")
-    assert "전체 통과 1/2" in report and "정답 불일치: expected 1" in report
+    no_rules = {**ok, "id": "c", "checks": []}  # an item with no rule check: rules do not apply to it
+    summary = runner.summarize([ok, bad, no_rules])
+    assert (summary["items"], summary["answer_ok"], summary["passed"]) == (3, 2, 2)
+    assert (summary["rules_ok"], summary["rules_n"]) == (2, 2)  # the item without checks is not counted
+    report = runner.format_report([ok, bad, no_rules], "claude-haiku-5-5")
+    assert "전체 통과 2/3" in report and "규칙 2/2" in report and "정답 불일치: expected 1" in report
+    assert "에이전트(계산기 툴)" in report
+    assert "[그룹별]" not in report  # one group only: no per-group line
+    two_groups = runner.format_report([ok, {**bad, "group": "exact"}], "claude-haiku-5-5")
+    assert "basic 정답 1/1 · 통과 1/1 | exact 정답 0/1 · 통과 0/1" in two_groups
+
+
+def test_load_dataset_can_pick_one_group():
+    exact = runner.load_dataset(str(DATASET), group="exact")
+    assert len(exact) == 6 and all(i["id"].startswith("exact-") for i in exact)
+    assert len(runner.load_dataset(str(DATASET), group="basic")) == 20
+
+
+def test_the_control_variant_is_labelled_and_skips_the_calculator_checks():
+    first_step, _final = card_01_script("카드 소득공제는 530만 원입니다.")[0], None
+    model = ScriptedModel(messages=iter([first_step, AIMessage("카드 소득공제는 530만 원입니다.")]))
+    result = runner.run_item(CARD_01, model, calculator=False)
+    assert result["variant"] == "no_calculator" and result["checks"] == []
+    assert result["answer_ok"] and result["passed"]
+    assert "calc_deduction" not in model.bound
+    assert "대조군(계산기 없음)" in runner.format_report([result], "claude-haiku-5-5")
 
 
 def test_main_prints_the_cost_estimate_first_and_saves_the_result(monkeypatch, tmp_path, capsys):

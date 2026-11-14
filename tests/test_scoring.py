@@ -4,7 +4,10 @@ from pathlib import Path
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from tax_agent.evaluation.scoring import Run, amounts, says_ineligible, says_zero, score_item
+from tax_agent.evaluation.scoring import (
+    Run, amounts, answer_match, args_relayed, needs_calculator, says_ineligible, says_not_found,
+    says_unsupported, says_zero, score_item,
+)
 from tax_agent.mock_api.deduction import CardSpending, calc_card_deduction
 from tax_agent.mock_api.source import MockDataSource
 
@@ -18,6 +21,9 @@ def test_amounts_reads_both_korean_styles():
     assert amounts("공제액은 530만원입니다") == {5_300_000}
     assert amounts("총급여 6,800만 원, 최저사용금액 1,700만원, 한도 25%") == {68_000_000, 17_000_000}
     assert amounts("공제가 없습니다") == set()
+    assert amounts("공제액은 167만 8,011원입니다") == {1_678_011}  # the mixed style a model uses for exact figures
+    assert amounts("공제 대상은 1억 2,000만 원, 한도는 300만원") == {120_000_000, 3_000_000}
+    assert amounts("2025년에 25%를 적용해 3개월 동안") == set()  # numbers without a won unit are not amounts
 
 
 def test_says_zero_and_says_ineligible():
@@ -115,4 +121,94 @@ def test_asking_for_the_missing_salary_before_calculating_passes():
 def test_guessing_the_salary_instead_of_asking_fails():
     run = ask_back_trail(AIMessage("카드 소득공제는 530만 원입니다."), calc_in_turn_1=True)
     failed = [c.name for c in score_item(ITEMS["ask-01"], run).checks if not c.ok]
-    assert "tool_not_called@turn1" in failed and "no_amount@turn1" in failed and "asks_question@turn1" in failed
+    assert "tool_not_called@turn1" in failed and "asks_question@turn1" in failed
+    assert "answer_not_contains_amount@turn1" in failed  # it stated the deduction before it had the salary
+
+
+def test_restating_known_data_while_asking_is_not_stating_the_deduction():
+    # Seen in a real run: the agent asks for the missing fact and recaps what the tools already told it.
+    reply = AIMessage("세대주이면서 무주택자이신가요? 확인된 정보는 총급여 5,000만 원, 월세 700만 원입니다.")
+    run = ask_back_trail(reply, calc_in_turn_1=False)
+    failed = [c.name for c in score_item(ITEMS["ask-01"], run).checks if not c.ok]
+    assert "answer_not_contains_amount@turn1" not in failed and "no_amount@turn1" not in failed
+
+
+def test_says_unsupported_and_says_not_found():
+    for text in ("교육비 공제는 아직 지원하지 않습니다.", "교육비는 계산할 수 없습니다.", "해당 도구가 제공되지 않아 확인이 어렵습니다. 아직 지원 전입니다."):
+        assert says_unsupported(text), text
+    for text in ("교육비 공제는 530만 원입니다.", "월세 공제를 받을 수 있습니다."):
+        assert not says_unsupported(text), text
+    for text in ("사용자 정보를 찾을 수 없습니다.", "해당 사용자는 등록되어 있지 않습니다.", "조회되지 않았습니다."):
+        assert says_not_found(text), text
+    assert not says_not_found("카드 소득공제는 530만 원입니다.")
+
+
+def run_with_answer(answer: str) -> Run:
+    messages = [HumanMessage("q"), AIMessage(answer)]
+    return Run(messages, [len(messages)])
+
+
+def test_answer_match_for_every_expected_form():
+    assert answer_match(run_with_answer("공제는 530만 원입니다."), {"amount": 5_300_000})[0]
+    assert not answer_match(run_with_answer("공제는 630만 원입니다."), {"amount": 5_300_000})[0]
+    assert answer_match(run_with_answer("카드 225만 원, 월세 1,020,000원입니다."), {"amounts": [2_250_000, 1_020_000]})[0]
+    assert not answer_match(run_with_answer("카드 225만 원입니다."), {"amounts": [2_250_000, 1_020_000]})[0]  # one missing
+    assert answer_match(run_with_answer("지원하지 않는 항목입니다."), {"unsupported": True})[0]
+    assert answer_match(run_with_answer("사용자를 찾을 수 없습니다."), {"not_found": True})[0]
+
+
+def test_a_null_in_the_profile_means_the_user_may_supply_the_value():
+    spending = {"annual_rent": 7_000_000}
+    messages = [
+        HumanMessage("월세 공제 얼마야?"),
+        AIMessage("", tool_calls=[{"name": "get_user_profile", "args": {"user_id": "user_p"}, "id": "1"}]),
+        tool_result("get_user_profile", {"user_id": "user_p", "gross_salary": 50_000_000, "homeless_household_head": None}, "1"),
+        AIMessage("", tool_calls=[{"name": "get_rent_payments", "args": {"user_id": "user_p", "year": 2025}, "id": "2"}]),
+        tool_result("get_rent_payments", spending, "2"),
+        AIMessage("", tool_calls=[{"name": "calc_deduction", "args": {
+            "item": "rent", "gross_salary": 50_000_000, "data": {**spending, "homeless_household_head": True}}, "id": "3"}]),
+        tool_result("calc_deduction", {"eligible": True, "reason": "ok", "deduction": 1_190_000}, "3"),
+        AIMessage("월세 세액공제는 119만 원입니다."),
+    ]
+    run = Run(messages, [len(messages)])
+    assert args_relayed(run, {})[0]  # True was given by the user, the profile said null
+    wrong = Run(messages[:5] + [AIMessage("", tool_calls=[{"name": "calc_deduction", "args": {
+        "item": "rent", "gross_salary": 50_000_000, "data": {"annual_rent": 7_700_000, "homeless_household_head": True}}, "id": "4"}])], [6])
+    assert not args_relayed(wrong, {})[0]  # a changed rent figure is still caught
+
+
+def test_every_calculator_result_must_appear_in_the_answer_of_a_two_topic_question():
+    spending = asdict(MockDataSource().get_card_spending("user_s", 2025))
+    card = asdict(calc_card_deduction(50_000_000, CardSpending(**spending)))
+    messages = [
+        HumanMessage("카드 공제랑 월세 공제 각각 얼마야?"),
+        AIMessage("", tool_calls=[{"name": "get_user_profile", "args": {"user_id": "user_s"}, "id": "1"}]),
+        tool_result("get_user_profile", {"user_id": "user_s", "gross_salary": 50_000_000, "homeless_household_head": True}, "1"),
+        AIMessage("", tool_calls=[{"name": "get_card_spending", "args": {"user_id": "user_s", "year": 2025}, "id": "2"}]),
+        tool_result("get_card_spending", spending, "2"),
+        AIMessage("", tool_calls=[{"name": "calc_deduction", "args": {"item": "card", "gross_salary": 50_000_000, "data": spending}, "id": "3"}]),
+        tool_result("calc_deduction", card, "3"),
+        AIMessage("", tool_calls=[{"name": "get_rent_payments", "args": {"user_id": "user_s", "year": 2025}, "id": "4"}]),
+        tool_result("get_rent_payments", {"annual_rent": 6_000_000}, "4"),
+        AIMessage("", tool_calls=[{"name": "calc_deduction", "args": {
+            "item": "rent", "gross_salary": 50_000_000, "data": {"annual_rent": 6_000_000, "homeless_household_head": True}}, "id": "5"}]),
+        tool_result("calc_deduction", {"eligible": True, "reason": "ok", "deduction": 1_020_000}, "5"),
+    ]
+
+    def score(answer: str):
+        full = messages + [AIMessage(answer)]
+        return score_item(ITEMS["multi-01"], Run(full, [len(full)]))
+
+    assert score("카드 소득공제는 225만 원, 월세 세액공제는 102만 원입니다.").passed
+    only_one = score("카드 소득공제는 225만 원입니다.")
+    assert not only_one.answer_ok and "answer_uses_tool_amount" in [c.name for c in only_one.checks if not c.ok]
+
+
+def test_the_control_variant_skips_the_checks_that_need_the_calculator():
+    assert needs_calculator({"type": "args_relayed"}) and needs_calculator({"type": "tool_called", "name": "calc_deduction"})
+    assert not needs_calculator({"type": "tool_called", "name": "get_user_profile"})
+    assert not needs_calculator({"type": "asks_question", "turn": 1})
+    no_calc = Run([HumanMessage("q"), AIMessage("카드 소득공제는 530만 원입니다.")], [2])
+    score = score_item(ITEMS["card-01"], no_calc, calculator=False)
+    assert score.checks == [] and score.passed  # the answer is right and no check applies
+    assert not score_item(ITEMS["card-01"], no_calc, calculator=True).rules_ok  # with the calculator, no tool call fails

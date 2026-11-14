@@ -14,8 +14,10 @@ class ScriptedModel(GenericFakeChatModel):
 
     seen: list = Field(default_factory=list)
     model: str = "claude-haiku-5-5"  # the CLI reads the model name from the model object
+    bound: list = Field(default_factory=list)  # names of the tools the agent bound to the model
 
     def bind_tools(self, tools, **kwargs):
+        self.bound = [t.name for t in tools]
         return self
 
     def _generate(self, messages, *args, **kwargs):
@@ -56,6 +58,19 @@ def test_tool_errors_go_back_to_the_model_instead_of_crashing():
     tool_message = next(m for m in messages if isinstance(m, ToolMessage))
     assert tool_message.status == "error" and "unsupported item" in tool_message.content
     assert messages[-1].text == "교육비는 아직 지원하지 않습니다."
+
+
+def test_the_control_agent_has_no_calculator_tool_and_the_rules_in_its_prompt():
+    control = ScriptedModel(messages=iter([AIMessage(content="ok")]))
+    ask(build_agent(MockDataSource(), "user_a", model=control, calculator=False), "hi")
+    assert "calc_deduction" not in control.bound and "get_card_spending" in control.bound
+    system = control.seen[0][0].content
+    assert "There is no calculator tool" in system and "Minimum usage = 25%" in system
+
+    normal = ScriptedModel(messages=iter([AIMessage(content="ok")]))
+    ask(build_agent(MockDataSource(), "user_a", model=normal), "hi")
+    assert "calc_deduction" in normal.bound
+    assert "Minimum usage" not in normal.seen[0][0].content  # the normal agent is not given the rules
 
 
 def test_model_name_priority(monkeypatch):

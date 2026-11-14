@@ -1,7 +1,8 @@
 """Run the eval set: ask the agent every question in the dataset, score the answers, print a report.
 
-    uv run eval              # all items
-    uv run eval --limit 2    # a cheap smoke run
+    uv run eval                  # all items, the agent with the calculator tool
+    uv run eval --no-calculator  # the control: the model calculates itself from the rules as text
+    uv run eval --limit 2        # a cheap smoke run
     uv run eval --only card-01,rent-01
 """
 import argparse
@@ -25,17 +26,22 @@ EST_TOKENS_PER_TURN = (7_000, 800)
 RESULTS_DIR = Path("evals/results")
 
 
-def load_dataset(path: str, only: list[str] | None = None, limit: int | None = None) -> list[dict]:
+def load_dataset(
+    path: str, only: list[str] | None = None, limit: int | None = None, group: str | None = None
+) -> list[dict]:
+    """Items without a "group" belong to "basic"; the harder amounts live in "exact"."""
     lines = Path(path).read_text(encoding="utf-8").splitlines()
     items = [json.loads(line) for line in lines if line.strip()]
     if only:
         items = [i for i in items if i["id"] in only]
+    if group:
+        items = [i for i in items if i.get("group", "basic") == group]
     return items[:limit] if limit else items
 
 
-def run_item(item: dict, model, source=None) -> dict:
+def run_item(item: dict, model, source=None, calculator: bool = True) -> dict:
     """Ask the agent every turn of one item and score it. A crash counts as a failed item."""
-    agent = build_agent(source or MockDataSource(), item["user"], model=model)
+    agent = build_agent(source or MockDataSource(), item["user"], model=model, calculator=calculator)
     messages, turn_ends, error = [], [], None
     started = time.perf_counter()
     try:
@@ -50,13 +56,16 @@ def run_item(item: dict, model, source=None) -> dict:
     run = Run(messages, turn_ends)
     tokens_in, tokens_out = token_totals(messages)
     result = {
-        "id": item["id"], "kind": item["kind"], "topic": item["topic"], "seconds": round(seconds, 2),
+        "id": item["id"], "group": item.get("group", "basic"), "kind": item["kind"], "topic": item["topic"],
+        "seconds": round(seconds, 2),
+        "variant": "calculator" if calculator else "no_calculator",
         "tokens_in": tokens_in, "tokens_out": tokens_out, "error": error,
         "tool_calls": [c.name for c in run.calls()], "answer": run.answer(),
+        "turn_answers": [run.answer(t) for t in range(1, len(turn_ends) + 1)],  # every turn, for debugging
     }
     if error is not None:
         return {**result, "answer_ok": False, "rules_ok": False, "passed": False, "answer_detail": error, "checks": []}
-    score = score_item(item, run)
+    score = score_item(item, run, calculator)
     return {
         **result, "answer_ok": score.answer_ok, "rules_ok": score.rules_ok, "passed": score.passed,
         "answer_detail": score.answer_detail, "checks": [asdict(c) for c in score.checks],
@@ -64,10 +73,12 @@ def run_item(item: dict, model, source=None) -> dict:
 
 
 def summarize(results: list[dict]) -> dict:
+    rated = [r for r in results if r["checks"] or r["error"]]  # items that have at least one rule check
     return {
         "items": len(results),
         "answer_ok": sum(r["answer_ok"] for r in results),
-        "rules_ok": sum(r["rules_ok"] for r in results),
+        "rules_n": len(rated),
+        "rules_ok": sum(r["rules_ok"] for r in rated),
         "passed": sum(r["passed"] for r in results),
         "tokens_in": sum(r["tokens_in"] for r in results),
         "tokens_out": sum(r["tokens_out"] for r in results),
@@ -79,8 +90,9 @@ def format_report(results: list[dict], model_name: str) -> str:
     mark = lambda ok: "O" if ok else "X"  # noqa: E731
     lines = [f"{'id':<10} {'정답':^4} {'규칙':^4} {'통과':^4} {'시간':>6}  툴 호출"]
     for r in results:
+        rules = mark(r["rules_ok"]) if (r["checks"] or r["error"]) else "-"  # "-": no rule check applies
         lines.append(
-            f"{r['id']:<10} {mark(r['answer_ok']):^4} {mark(r['rules_ok']):^4} {mark(r['passed']):^4} "
+            f"{r['id']:<10} {mark(r['answer_ok']):^4} {rules:^4} {mark(r['passed']):^4} "
             f"{r['seconds']:>5.1f}s  {' > '.join(r['tool_calls']) or '-'}"
         )
     failed = [r for r in results if not r["passed"]]
@@ -95,11 +107,21 @@ def format_report(results: list[dict], model_name: str) -> str:
     s = summarize(results)
     cost = estimate_cost_usd(model_name, s["tokens_in"], s["tokens_out"])
     cost_text = f"~${cost:.4f}" if cost is not None else "n/a"
+    variant = results[0]["variant"] if results else "calculator"
+    label = "대조군(계산기 없음)" if variant == "no_calculator" else "에이전트(계산기 툴)"
     lines.append(
-        f"\n[요약] 정답 일치 {s['answer_ok']}/{s['items']} · 규칙 {s['rules_ok']}/{s['items']} · "
+        f"\n[요약 · {label}] 정답 일치 {s['answer_ok']}/{s['items']} · 규칙 {s['rules_ok']}/{s['rules_n']} · "
         f"**전체 통과 {s['passed']}/{s['items']}**"
     )
     lines.append(f"[비용·지연] 토큰 in/out {s['tokens_in']}/{s['tokens_out']} · 합계 {s['seconds']}s · 비용 {cost_text} (추정)")
+    groups = sorted({r.get("group", "basic") for r in results})
+    if len(groups) > 1:  # report each group on its own: the harder "exact" items should not hide in an average
+        parts = []
+        for g in groups:
+            members = [r for r in results if r.get("group", "basic") == g]
+            parts.append(f"{g} 정답 {sum(r['answer_ok'] for r in members)}/{len(members)} · "
+                         f"통과 {sum(r['passed'] for r in members)}/{len(members)}")
+        lines.append("[그룹별] " + " | ".join(parts))
     return "\n".join(lines)
 
 
@@ -108,21 +130,24 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--dataset", default="evals/dataset.jsonl")
     parser.add_argument("--model", help="model id; default: TAX_AGENT_MODEL or the built-in default")
     parser.add_argument("--only", help="comma-separated item ids")
+    parser.add_argument("--group", help='run only one group of items: "basic" (default items) or "exact" (odd amounts)')
     parser.add_argument("--limit", type=int, help="run only the first N items")
+    parser.add_argument("--no-calculator", action="store_true", help="control: no calc_deduction tool, rules as text")
     parser.add_argument("--no-save", action="store_true", help="do not write evals/results/<time>.json")
     args = parser.parse_args(argv)
     sys.stdout.reconfigure(errors="replace")  # a piped Windows console may not encode every character
 
-    items = load_dataset(args.dataset, args.only.split(",") if args.only else None, args.limit)
+    items = load_dataset(args.dataset, args.only.split(",") if args.only else None, args.limit, args.group)
     model = get_model(args.model)
     questions = sum(len(i["turns"]) for i in items)
     estimate = estimate_cost_usd(model.model, questions * EST_TOKENS_PER_TURN[0], questions * EST_TOKENS_PER_TURN[1])
-    print(f"[eval] {len(items)} items, {questions} questions | model={model.model} | dataset={args.dataset}")
+    variant = "no_calculator" if args.no_calculator else "calculator"
+    print(f"[eval] {len(items)} items, {questions} questions | model={model.model} | variant={variant} | dataset={args.dataset}")
     print("[eval] estimated cost of this run: " + (f"~${estimate:.4f}" if estimate is not None else "n/a (model not in price table)"))
 
     results = []
     for item in items:
-        result = run_item(item, model)
+        result = run_item(item, model, calculator=not args.no_calculator)
         results.append(result)
         print(f"  {item['id']:<10} {'PASS' if result['passed'] else 'FAIL'}  {result['seconds']}s", flush=True)
     tracing.flush()  # eval traces are sent to Langfuse when tracing is on
@@ -134,7 +159,8 @@ def main(argv: list[str] | None = None) -> None:
         path = RESULTS_DIR / f"{now:%Y%m%d-%H%M%S}.json"
         record = {
             "created": now.isoformat(), "argv": ["eval", *(argv if argv is not None else sys.argv[1:])],
-            "model": model.model, "dataset": args.dataset, "summary": summarize(results), "results": results,
+            "model": model.model, "variant": variant, "dataset": args.dataset,
+            "summary": summarize(results), "results": results,
         }
         path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"[eval] saved {path}")
