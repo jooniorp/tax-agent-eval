@@ -12,9 +12,9 @@
 3. **규칙 계산기** (`mock_api.deduction`·`mock_api.rent`·`mock_api.medical`): 카드 소득공제, 월세 세액공제, 의료비 세액공제를 규칙으로 계산한다. 평가의 정답을 만드는 코드이기도 하다.
 4. **에이전트** (`agent` + `llm` + `cli`): LangGraph로 만든 모델-툴 루프(`agent`), LLM을 만드는 한 곳(`llm`), 명령줄 진입점(`cli`).
 5. **트레이싱** (`tracing`): 실행을 Langfuse로 보낸다. 키가 없으면 꺼져 있다.
-6. **평가** (`evaluation.scoring` + `evaluation.runner`): 문항 10개를 실제 모델로 돌리고 채점한다. `uv run eval`.
+6. **평가** (`evaluation.scoring` + `evaluation.runner`): 문항 26개(기본 20 + 원 단위 6)를 실제 모델로 돌리고 채점한다. `uv run eval`, 대조군은 `uv run eval --no-calculator`.
 
-에이전트는 `build_agent(source, user_id)`로 만들고, 어떤 데이터 소스를 쓸지는 호출하는 쪽이 넘긴다(아래 "어떻게 이어지나"). 실행은 `uv run tax-agent "질문" --user user_a`다. 실제 모델(`claude-haiku-5-5`)로 문항 1을 1회 돌려 툴 3개가 순서대로 호출되고 5,300,000원이 나오는 것을 확인했다(2026-11-07, 토큰 입력/출력 4,095/942, 약 $0.0009, 6.8초). 1회 관찰이라 정확도 수치는 아니다. 테스트는 가짜 모델로 연결만 검증한다. 평가는 `uv run eval`이 `evals/dataset.jsonl`의 10문항을 실제 모델로 돌린다(아래 "평가 흐름").
+에이전트는 `build_agent(source, user_id)`로 만들고, 어떤 데이터 소스를 쓸지는 호출하는 쪽이 넘긴다(아래 "어떻게 이어지나"). 실행은 `uv run tax-agent "질문" --user user_a`다. 실제 모델(`claude-haiku-5-5`)로 문항 1을 1회 돌려 툴 3개가 순서대로 호출되고 5,300,000원이 나오는 것을 확인했다(2026-11-07, 토큰 입력/출력 4,095/942, 약 $0.0009, 6.8초). 1회 관찰이라 정확도 수치는 아니다. 테스트는 가짜 모델로 연결만 검증한다. 평가는 `uv run eval`이 `evals/dataset.jsonl`의 26문항을 실제 모델로 돌린다(아래 "평가 흐름").
 
 ## 의존 그래프
 
@@ -27,6 +27,7 @@ graph LR
   tax_agent_cli["cli"]
   tax_agent_datasource["datasource"]
   tax_agent_llm["llm"]
+  tax_agent_rules["rules"]
   tax_agent_tools["tools"]
   tax_agent_tracing["tracing"]
   subgraph pkg_evaluation["evaluation/"]
@@ -41,6 +42,7 @@ graph LR
   end
   tax_agent_agent --> tax_agent_datasource
   tax_agent_agent --> tax_agent_llm
+  tax_agent_agent --> tax_agent_rules
   tax_agent_agent --> tax_agent_tools
   tax_agent_cli --> tax_agent_agent
   tax_agent_cli --> tax_agent_llm
@@ -71,14 +73,15 @@ graph LR
 |---|---|---|
 | `tools` | 에이전트가 부르는 함수 5개(`get_user_profile`, `get_card_spending`, `get_rent_payments`, `get_medical_expenses`, `calc_deduction`)를 `build_tools(source)`로 만든다. 데이터 소스는 인자로 받는다 | 구현됨 |
 | `datasource` | `DataSource` 인터페이스(Protocol)와 `UserProfile`. 툴과 데이터 출처 사이의 경계 | 구현됨 |
-| `mock_api.source` | `MockDataSource`: 가상 사용자 10명(`user_a`~`user_k`)의 프로필·카드 사용액·월세·의료비. 사용자마다 평가 문항 하나를 위해 만들었다. 실연동 때 이 자리에 다른 구현이 들어온다 | 구현됨 (사용자 10명) |
+| `mock_api.source` | `MockDataSource`: 가상 사용자 23명(`user_a`~`user_y`)의 프로필·카드 사용액·월세·의료비. 사용자마다 평가 문항 하나를 위해 만들었다. 실연동 때 이 자리에 다른 구현이 들어온다 | 구현됨 (사용자 23명) |
 | `mock_api.deduction` | `calc_card_deduction`: 카드 소득공제를 규칙으로 계산한다. `calc_deduction` 툴의 실체이자 평가의 정답 생성기. 국세청 2025 귀속 책자 133쪽 ⑥·136~138쪽 기준. 문턱 차감 순서와 한도 정보(`base_limit`, `extra_deduction`)까지 돌려준다 | 구현됨 (카드) |
 | `mock_api.rent` | `calc_rent_credit`: 월세 세액공제. 총급여 8천만원 초과 또는 무주택 세대주가 아니면 대상 아님(`eligible=false`와 `reason`), 5,500만원 이하 17%·초과 15%, 월세 연 1,000만원 한도. 책자 202~203쪽 기준 | 구현됨 |
 | `mock_api.medical` | `calc_medical_credit`: 의료비 세액공제. 총급여 3% 문턱을 '그 외 부양가족'(700만원 한도) 의료비부터 차감하고, 보험금으로 돌려받은 금액은 뺀다. 책자 173·176쪽 기준. 난임시술비·미숙아 구분은 범위 밖 | 구현됨 |
-| `evaluation.scoring` | 채점 순수 함수. 금액 표기 정규화(`5,300,000원`·`530만 원`), 정답 일치와 규칙 검사 10종(`tool_called`, `args_relayed`, `answer_uses_tool_amount`, `asks_question` …), 문항별 점수. 모델을 부르지 않아 단위 테스트가 된다 | 구현됨 |
-| `evaluation.runner` | `uv run eval`: 데이터셋을 읽어 문항마다 에이전트를 만들고(다중 턴 지원) 실행·채점하고, 실행 전에 예상 비용을 출력하며, 결과를 `evals/results/<시각>.json`에 저장한다. 문항마다 Langfuse trace `eval-<id>`가 생긴다 | 구현됨 |
-| `agent` | `build_agent(source, user_id, model)`: 모델 노드와 툴 노드가 도는 LangGraph 그래프를 만든다. `ask(agent, question)`은 질문 하나를 실행하고 메시지 전체를 돌려준다. 한 질문당 최대 12 스텝. `history`로 후속 질문을 이어 갈 수 있고(되묻기 문항), `token_totals()`도 여기 있다 | 구현됨 (평가셋 10문항으로 확인) |
+| `evaluation.scoring` | 채점 순수 함수. 금액 표기 정규화(`5,300,000원`·`530만 원`·`167만 8,011원`), 정답 일치(금액·0원·대상 아님·여러 금액·지원 안 함·사용자 없음)와 규칙 검사 11종(`tool_called`, `args_relayed`, `answer_uses_tool_amount`, `asks_question` …), 문항별 점수(`calculator=False`면 계산기 전용 검사를 뺀다). 모델을 부르지 않아 단위 테스트가 된다 | 구현됨 |
+| `evaluation.runner` | `uv run eval [--no-calculator] [--group basic|exact]`: 데이터셋을 읽어 문항마다 에이전트를 만들고(다중 턴 지원) 실행·채점하고, 실행 전에 예상 비용을 출력하며, 결과를 `evals/results/<시각>.json`에 저장한다. 문항마다 Langfuse trace `eval-<id>`가 생긴다 | 구현됨 |
+| `agent` | `build_agent(source, user_id, model, calculator=True)`: 모델 노드와 툴 노드가 도는 LangGraph 그래프를 만든다. `calculator=False`는 계산기 툴을 빼고 규칙을 프롬프트에 텍스트로 주는 대조군이다. `ask(agent, question)`은 질문 하나를 실행하고 메시지 전체를 돌려준다. 한 질문당 최대 12 스텝. `history`로 후속 질문을 이어 갈 수 있고(되묻기 문항), `token_totals()`도 여기 있다 | 구현됨 (평가셋 26문항으로 확인) |
 | `llm` | `get_model()`: LLM을 만드는 유일한 곳. 모델 이름은 인자 → 환경변수 `TAX_AGENT_MODEL` → 기본값 `claude-haiku-5-5` 순으로 정한다. `estimate_cost_usd()`와 가격표도 여기 있다 | 구현됨 |
+| `rules` | 세 공제의 규칙을 영어 텍스트(`RULES_TEXT`)로 적은 것. 대조군 프롬프트에만 쓰인다. 숫자와 반올림 규칙이 계산기와 같은지 `tests/test_rules.py`가 지킨다 | 구현됨 |
 | `cli` | `tax-agent` 명령. `MockDataSource`를 골라 `build_agent`에 넘기고, 질문 하나를 실행해 툴 호출 순서·답변·소요 시간·토큰·추정 비용을 출력한다 | 구현됨 (실제 모델로 문항 1을 1회 확인) |
 | `tracing` | `trace()`가 Langfuse 콜백 핸들러를 만들어 `ask(callbacks=...)`로 넘기게 하고, `flush()`가 종료 전에 전송한다. `LANGFUSE_PUBLIC_KEY`·`LANGFUSE_SECRET_KEY`가 둘 다 있을 때만 켜지고, 아니면 아무것도 import하지 않는다. `agent`는 이 모듈을 모른다. Anthropic SDK가 따로 내보내는 중복 스팬은 걸러 낸다(안 걸러 내면 비용·토큰이 2배로 잡힌다) | 구현됨 (Langfuse API 조회로 확인) |
 
@@ -107,10 +110,12 @@ LLM은 어떤 툴을 언제 부를지 판단하고 결과를 설명할 뿐, 금�
 1. `evals/dataset.jsonl`에서 문항을 읽는다. 문항은 사용자, 질문(1~2턴), 기대 정답, 규칙 검사 목록으로 이루어진다.
 2. 실행 전에 예상 비용을 출력한다.
 3. 문항마다 그 사용자용 에이전트를 만들어 질문을 차례로 던진다(`ask`, 후속 질문은 `history`로 이어 감). 실행은 Langfuse trace `eval-<id>`로 남는다.
-4. `scoring`이 메시지 기록을 두 가지로 채점한다. **정답 일치**: 최종 답변이 기대 금액(또는 "0원", "대상 아님")을 말하는가. **규칙**: 툴 호출 순서, 계산기에 넘긴 숫자가 데이터 툴 결과와 같은가, 답변 금액이 계산기 결과와 같은가, 되묻기 문항에서 총급여를 받기 전에 계산하거나 금액을 말하지 않았는가. 두 방식을 모두 통과해야 문항 통과다.
+4. `scoring`이 메시지 기록을 두 가지로 채점한다. **정답 일치**: 최종 답변이 기대 금액(또는 "0원", "대상 아님")을 말하는가. **규칙**: 툴 호출 순서, 계산기에 넘긴 숫자가 데이터 툴 결과와 같은가, 답변 금액이 계산기 결과와 같은가, 되묻기 문항에서 필요한 정보를 받기 전에 계산하거나 공제액을 말하지 않았는가(이미 조회한 데이터를 되풀이하는 것은 허용). 두 방식을 모두 통과해야 문항 통과다.
 5. 요약(정답 일치·규칙·전체 통과, 토큰, 시간, 추정 비용)을 출력하고 결과를 JSON으로 저장한다.
 
 기대 정답은 데이터셋에 손으로 적어 두고, `tests/test_eval_dataset.py`가 계산기 결과와 같은지 매번 확인한다. 정답과 계산기가 어긋나면 테스트가 깨진다.
+
+**대조군** (`--no-calculator`): `build_agent(..., calculator=False)`로 같은 에이전트에서 `calc_deduction`만 빼고 같은 행동 규칙에 세 공제의 규칙 텍스트(`rules`)를 더한다. 모델이 규칙을 알아도 직접 계산하면 틀리는지를 재는 용도다. 채점은 같은 정답 일치에 계산기 전용이 아닌 규칙 검사만 적용한다. 문항은 `basic`(20)과 `exact`(원 단위 6) 그룹으로 나뉘어 `--group`으로 따로 돌릴 수 있고, 요약에도 그룹별로 나온다.
 
 ## 의존 방향과 규칙
 
