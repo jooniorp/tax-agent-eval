@@ -20,6 +20,8 @@ dependencies = [
 tax-agent = "tax_agent.cli:main"
 eval = "tax_agent.evaluation.runner:main"
 eval-compare = "tax_agent.evaluation.compare:main"
+sim-eval = "tax_agent.evaluation.classify_eval:main"
+sim-agent = "tax_agent.evaluation.sim_agent:main"
 
 [build-system]
 requires = ["hatchling"]

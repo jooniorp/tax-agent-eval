@@ -11,3 +11,7 @@ docs/sources/*.pdf
 
 # raw eval run results; copy the one quoted in the README under docs/
 evals/results/
+
+# real personal financial / tax data and anything derived from it (downloads, exports, screenshots,
+# logs, answers). The repository is public: nothing real goes into it. See CLAUDE.md "B안".
+private/
