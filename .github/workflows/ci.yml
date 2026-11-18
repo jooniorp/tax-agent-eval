@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:  # the regression eval can also be started by hand from the Actions tab
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # Unit tests: no model call, no secret, free. Runs on every push and pull request.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: "3.10"
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run pytest -q
+
+  eval:
+    # Regression eval: asks the real model a fixed set of 8 items and fails when fewer than 85% pass, so
+    # fewer than 7 of 8 (one flaky answer is tolerated). It costs a few tenths of a cent per run (the guard
+    # below refuses to start above $0.05). It never runs on pull requests: a pull request from a fork gets no
+    # secrets, and opening one must not be a way to spend the key.
+    if: github.event_name != 'pull_request'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - name: No API key
+        if: ${{ env.ANTHROPIC_API_KEY == '' }}
+        run: echo "::warning::The ANTHROPIC_API_KEY repository secret is not set, so the regression eval was skipped."
+      - uses: actions/checkout@v7.0.1
+        if: ${{ env.ANTHROPIC_API_KEY != '' }}
+      - uses: astral-sh/setup-uv@v10.3.3
+        if: ${{ env.ANTHROPIC_API_KEY != '' }}
+        with:
+          python-version: "3.10"
+          enable-cache: true
+      - name: Regression eval (8 items, real model, tracing off because no Langfuse keys are set here)
+        if: ${{ env.ANTHROPIC_API_KEY != '' }}
+        run: >
+          uv run --frozen eval
+          --only card-01,rent-01,med-01,ask-01,edge-01,edge-02,multi-01,exact-01
+          --min-pass-rate 0.85 --max-estimated-cost 0.05
+      - name: Keep the result file
+        if: ${{ always() && env.ANTHROPIC_API_KEY != '' }}
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: eval-results
+          path: evals/results/*.json
+          if-no-files-found: ignore
+          retention-days: 30

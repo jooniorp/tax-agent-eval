@@ -157,6 +157,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--variant", choices=VARIANTS, default=DEFAULT_VARIANT, help=f"which agent to run (default: {DEFAULT_VARIANT})")
     parser.add_argument("--no-calculator", action="store_true", help="shorthand for --variant no_calculator")
     parser.add_argument("--no-save", action="store_true", help="do not write evals/results/<time>.json")
+    parser.add_argument("--min-pass-rate", type=float, metavar="RATE",
+                        help="regression gate: exit with status 1 when the share of passed items is below RATE (0-1)")
+    parser.add_argument("--max-estimated-cost", type=float, metavar="USD",
+                        help="cost guard: exit with status 2 before any model call when the estimate is above USD or unknown")
     args = parser.parse_args(argv)
     sys.stdout.reconfigure(errors="replace")  # a piped Windows console may not encode every character
 
@@ -168,6 +172,9 @@ def main(argv: list[str] | None = None) -> None:
     estimate = estimate_cost_usd(model.model, questions * tokens_in, questions * tokens_out)
     print(f"[eval] {len(items)} items, {questions} questions | model={model.model} | variant={variant} | dataset={args.dataset}")
     print("[eval] estimated cost of this run: " + (f"~${estimate:.4f}" if estimate is not None else "n/a (model not in price table)"))
+    if args.max_estimated_cost is not None and (estimate is None or estimate > args.max_estimated_cost):
+        print(f"[eval] refused: the estimate is above the limit of ${args.max_estimated_cost:.4f} or unknown; no model was called")
+        sys.exit(2)
 
     results = []
     for item in items:
@@ -188,3 +195,8 @@ def main(argv: list[str] | None = None) -> None:
         }
         path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"[eval] saved {path}")
+
+    passed = sum(r["passed"] for r in results)
+    if args.min_pass_rate is not None and results and passed / len(results) < args.min_pass_rate:
+        print(f"[eval] regression: {passed}/{len(results)} passed, below the required rate {args.min_pass_rate:.0%}")
+        sys.exit(1)

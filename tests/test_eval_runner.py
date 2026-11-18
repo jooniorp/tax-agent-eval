@@ -126,3 +126,37 @@ def test_every_variant_has_a_token_estimate_and_the_default_one_is_the_cheapest(
     assert set(runner.EST_TOKENS_PER_TURN) == set(VARIANTS)
     cost = {v: runner.estimate_cost_usd("claude-haiku-5-5", *runner.EST_TOKENS_PER_TURN[v]) for v in VARIANTS}
     assert cost[DEFAULT_VARIANT] == min(cost.values())
+
+
+def _main_with(monkeypatch, tmp_path, answer, *flags):
+    monkeypatch.chdir(tmp_path)
+    model = ScriptedModel(messages=iter(card_01_script(answer)))
+    monkeypatch.setattr(runner, "get_model", lambda name=None: model)
+    runner.main(["--dataset", str(DATASET), "--only", "card-01", "--variant", "calculator", "--no-save", *flags])
+    return model
+
+
+def test_the_regression_gate_exits_with_status_1_below_the_required_pass_rate(monkeypatch, tmp_path, capsys):
+    import pytest
+
+    with pytest.raises(SystemExit) as stop:
+        _main_with(monkeypatch, tmp_path, "카드 소득공제는 630만 원입니다.", "--min-pass-rate", "1.0")  # a wrong answer
+    assert stop.value.code == 1 and "regression: 0/1 passed" in capsys.readouterr().out
+    _main_with(monkeypatch, tmp_path, "카드 소득공제는 530만 원입니다.", "--min-pass-rate", "1.0")  # a right one: no exit
+    _main_with(monkeypatch, tmp_path, "카드 소득공제는 630만 원입니다.")  # without the flag a failure is only reported
+
+
+def test_the_cost_guard_stops_before_any_model_call(monkeypatch, tmp_path, capsys):
+    import pytest
+
+    model = ScriptedModel(messages=iter([]))  # any call would raise
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(runner, "get_model", lambda name=None: model)
+    args = ["--dataset", str(DATASET), "--only", "card-01", "--no-save"]
+    with pytest.raises(SystemExit) as stop:
+        runner.main([*args, "--max-estimated-cost", "0.0000001"])
+    assert stop.value.code == 2 and model.seen == [] and "refused" in capsys.readouterr().out
+    model.model = "a-model-without-a-price"  # an unknown price is refused too: the guard cannot vouch for it
+    with pytest.raises(SystemExit) as stop:
+        runner.main([*args, "--max-estimated-cost", "5"])
+    assert stop.value.code == 2 and model.seen == []
