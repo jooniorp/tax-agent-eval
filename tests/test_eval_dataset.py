@@ -41,12 +41,12 @@ def ground_truth(item: dict) -> dict:
 
 
 def test_dataset_has_two_groups_of_unique_items_covering_every_planned_kind():
-    assert len(ITEMS) == 26
-    assert len({i["id"] for i in ITEMS}) == 26
+    assert len(ITEMS) == 32
+    assert len({i["id"] for i in ITEMS}) == 32
     groups = [i.get("group", "basic") for i in ITEMS]
-    assert (groups.count("basic"), groups.count("exact")) == (20, 6)
+    assert (groups.count("basic"), groups.count("exact"), groups.count("sweep")) == (20, 6, 6)
     topics = [i["topic"] for i in ITEMS]
-    assert {t: topics.count(t) for t in set(topics)} == {"card": 10, "rent": 7, "medical": 6, "edge": 2, "multi": 1}
+    assert {t: topics.count(t) for t in set(topics)} == {"card": 16, "rent": 7, "medical": 6, "edge": 2, "multi": 1}
     assert {i["kind"] for i in ITEMS} == {
         "amount", "zero", "ineligible", "explain", "ask_back", "false_premise", "unsupported", "not_found", "multi",
     }
@@ -73,6 +73,19 @@ def test_the_ask_back_users_really_have_the_information_missing():
     assert salary_case["given_gross_salary"] == 68_000_000 and len(salary_case["turns"]) == 2
     assert SOURCE.get_user_profile(rent_case["user"]).homeless_household_head is None
     assert rent_case["given_homeless"] is True and len(rent_case["turns"]) == 2
+
+
+def test_the_length_sweep_changes_only_the_number_of_categories():
+    sweep = [i for i in ITEMS if i.get("group") == "sweep"]
+    assert [i["id"] for i in sweep] == [f"sweep-{k}" for k in range(1, 7)]
+    assert len({i["turns"][0] for i in sweep}) == 1  # the same question every time
+    for k, item in enumerate(sweep, start=1):
+        spending = SOURCE.get_card_spending(item["user"], 2025)
+        used = [v for v in vars(spending).values() if v]
+        assert len(used) == k and sum(used) == 15_271_830, item["id"]  # k categories, one fixed total
+        assert SOURCE.get_user_profile(item["user"]).gross_salary == 40_000_000
+        assert item["expected"]["amount"] < 3_000_000, item["id"]  # under the cap, so every category matters
+        assert item["expected"]["amount"] % 1000 != 0, item["id"]  # and the answer is not round
 
 
 def test_an_ask_back_item_forbids_exactly_the_final_amount_in_its_first_reply():

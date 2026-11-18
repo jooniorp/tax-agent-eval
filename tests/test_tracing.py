@@ -64,9 +64,9 @@ def test_tracing_turns_on_only_when_both_keys_are_set(monkeypatch):
 def test_ask_passes_callbacks_through_the_graph():
     recorder = RecordingHandler()
     model = ScriptedModel(messages=iter([
-        call("get_user_profile", {"user_id": "user_a"}, "1"),
+        call("compute_deduction", {"user_id": "user_a", "item": "card"}, "1"),
         AIMessage(content="done"),
     ]))
     agent = build_agent(MockDataSource(), "user_a", model=model)
     ask(agent, "hi", callbacks=[recorder])
-    assert recorder.tool_names == ["get_user_profile"]  # the handler Langfuse relies on sees tool runs
+    assert recorder.tool_names == ["compute_deduction"]  # the handler Langfuse relies on sees tool runs

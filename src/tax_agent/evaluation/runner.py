@@ -1,7 +1,8 @@
 """Run the eval set: ask the agent every question in the dataset, score the answers, print a report.
 
-    uv run eval                  # all items, the agent with the calculator tool
-    uv run eval --no-calculator  # the control: the model calculates itself from the rules as text
+    uv run eval                       # all items, the default agent (one compute_deduction tool)
+    uv run eval --variant calculator  # the step-by-step agent: profile, data, then calc_deduction
+    uv run eval --no-calculator       # the control: the model calculates itself from the rules as text
     uv run eval --limit 2        # a cheap smoke run
     uv run eval --only card-01,rent-01
 """
@@ -13,16 +14,20 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from langchain_core.messages import AIMessage
+
 from tax_agent import tracing
-from tax_agent.agent import ask, build_agent, token_totals
+from tax_agent.agent import DEFAULT_VARIANT, VARIANTS, ask, build_agent, reasoning_tokens, token_totals
 from tax_agent.evaluation.scoring import Run, score_item
+from tax_agent.evaluation.timing import CallTimer
 from tax_agent.llm import estimate_cost_usd, get_model
 from tax_agent.mock_api.source import MockDataSource
 
-# Tokens assumed per question for the cost estimate printed before a run. Measured on the two
-# full eval runs of 2026-11-10: on average 6.9k in / 0.76-0.80k out per question (an item's
-# input grows with every tool round), rounded up. Re-measure when the prompt or the tools change.
-EST_TOKENS_PER_TURN = (7_000, 800)
+# Tokens (in, out) assumed per question for the cost estimate printed before a run, per agent variant.
+# Measured on the three-variant batch of 2026-11-14 (34 questions per pass of the 32 items), rounded up:
+# calculator 6.9k / 0.86k, no_calculator 6.2k / 1.12k, combined 2.4k / 0.67k. An item's input grows with
+# every tool round, so the step-by-step agents cost more input. Re-measure when the prompt or the tools change.
+EST_TOKENS_PER_TURN = {"calculator": (7_000, 900), "no_calculator": (6_500, 1_150), "combined": (2_500, 700)}
 RESULTS_DIR = Path("evals/results")
 
 
@@ -39,15 +44,16 @@ def load_dataset(
     return items[:limit] if limit else items
 
 
-def run_item(item: dict, model, source=None, calculator: bool = True) -> dict:
+def run_item(item: dict, model, source=None, variant: str = DEFAULT_VARIANT) -> dict:
     """Ask the agent every turn of one item and score it. A crash counts as a failed item."""
-    agent = build_agent(source or MockDataSource(), item["user"], model=model, calculator=calculator)
+    agent = build_agent(source or MockDataSource(), item["user"], model=model, variant=variant)
     messages, turn_ends, error = [], [], None
+    timer = CallTimer()
     started = time.perf_counter()
     try:
         with tracing.trace(f"eval-{item['id']}", user_id=item["user"]) as callbacks:
             for question in item["turns"]:
-                messages = ask(agent, question, callbacks=callbacks, history=messages)
+                messages = ask(agent, question, callbacks=[*callbacks, timer], history=messages)
                 turn_ends.append(len(messages))
     except Exception as e:  # e.g. the step limit; the eval goes on with the next item
         error = f"{type(e).__name__}: {e}"
@@ -58,14 +64,18 @@ def run_item(item: dict, model, source=None, calculator: bool = True) -> dict:
     result = {
         "id": item["id"], "group": item.get("group", "basic"), "kind": item["kind"], "topic": item["topic"],
         "seconds": round(seconds, 2),
-        "variant": "calculator" if calculator else "no_calculator",
+        "variant": variant,
         "tokens_in": tokens_in, "tokens_out": tokens_out, "error": error,
+        "reasoning_tokens": reasoning_tokens(messages),  # part of tokens_out spent thinking
+        "model_calls": sum(isinstance(m, AIMessage) for m in messages),
+        "model_seconds": round(sum(timer.model_seconds), 2),  # of `seconds`: the model calls ...
+        "tool_seconds": round(timer.tool_seconds, 3),  # ... and the tools; the rest is graph overhead
         "tool_calls": [c.name for c in run.calls()], "answer": run.answer(),
         "turn_answers": [run.answer(t) for t in range(1, len(turn_ends) + 1)],  # every turn, for debugging
     }
     if error is not None:
         return {**result, "answer_ok": False, "rules_ok": False, "passed": False, "answer_detail": error, "checks": []}
-    score = score_item(item, run, calculator)
+    score = score_item(item, run, variant)
     return {
         **result, "answer_ok": score.answer_ok, "rules_ok": score.rules_ok, "passed": score.passed,
         "answer_detail": score.answer_detail, "checks": [asdict(c) for c in score.checks],
@@ -82,6 +92,9 @@ def summarize(results: list[dict]) -> dict:
         "passed": sum(r["passed"] for r in results),
         "tokens_in": sum(r["tokens_in"] for r in results),
         "tokens_out": sum(r["tokens_out"] for r in results),
+        "reasoning_tokens": sum(r.get("reasoning_tokens", 0) for r in results),
+        "model_calls": sum(r.get("model_calls", 0) for r in results),
+        "model_seconds": round(sum(r.get("model_seconds", 0) for r in results), 1),
         "seconds": round(sum(r["seconds"] for r in results), 1),
     }
 
@@ -108,12 +121,19 @@ def format_report(results: list[dict], model_name: str) -> str:
     cost = estimate_cost_usd(model_name, s["tokens_in"], s["tokens_out"])
     cost_text = f"~${cost:.4f}" if cost is not None else "n/a"
     variant = results[0]["variant"] if results else "calculator"
-    label = "대조군(계산기 없음)" if variant == "no_calculator" else "에이전트(계산기 툴)"
+    label = {"no_calculator": "대조군(계산기 없음)", "combined": "에이전트(통합 툴 1개)"}.get(variant, "에이전트(계산기 툴)")
     lines.append(
         f"\n[요약 · {label}] 정답 일치 {s['answer_ok']}/{s['items']} · 규칙 {s['rules_ok']}/{s['rules_n']} · "
         f"**전체 통과 {s['passed']}/{s['items']}**"
     )
-    lines.append(f"[비용·지연] 토큰 in/out {s['tokens_in']}/{s['tokens_out']} · 합계 {s['seconds']}s · 비용 {cost_text} (추정)")
+    thinking = ""
+    if s["model_calls"]:  # runs saved before 2026-11-14 do not have these fields
+        share = s["reasoning_tokens"] / s["tokens_out"] if s["tokens_out"] else 0
+        thinking = (f" · 추론 토큰 {s['reasoning_tokens']}(출력의 {share:.0%}) · 모델 호출 {s['model_calls']}회"
+                    f" · 모델 시간 {s['model_seconds']}s")
+    lines.append(
+        f"[비용·지연] 토큰 in/out {s['tokens_in']}/{s['tokens_out']} · 합계 {s['seconds']}s · 비용 {cost_text} (추정)" + thinking
+    )
     groups = sorted({r.get("group", "basic") for r in results})
     if len(groups) > 1:  # report each group on its own: the harder "exact" items should not hide in an average
         parts = []
@@ -130,9 +150,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--dataset", default="evals/dataset.jsonl")
     parser.add_argument("--model", help="model id; default: TAX_AGENT_MODEL or the built-in default")
     parser.add_argument("--only", help="comma-separated item ids")
-    parser.add_argument("--group", help='run only one group of items: "basic" (default items) or "exact" (odd amounts)')
+    parser.add_argument(
+        "--group", help='run only one group: "basic" (default items), "exact" (odd amounts) or "sweep" (1-6 card categories)'
+    )
     parser.add_argument("--limit", type=int, help="run only the first N items")
-    parser.add_argument("--no-calculator", action="store_true", help="control: no calc_deduction tool, rules as text")
+    parser.add_argument("--variant", choices=VARIANTS, default=DEFAULT_VARIANT, help=f"which agent to run (default: {DEFAULT_VARIANT})")
+    parser.add_argument("--no-calculator", action="store_true", help="shorthand for --variant no_calculator")
     parser.add_argument("--no-save", action="store_true", help="do not write evals/results/<time>.json")
     args = parser.parse_args(argv)
     sys.stdout.reconfigure(errors="replace")  # a piped Windows console may not encode every character
@@ -140,14 +163,15 @@ def main(argv: list[str] | None = None) -> None:
     items = load_dataset(args.dataset, args.only.split(",") if args.only else None, args.limit, args.group)
     model = get_model(args.model)
     questions = sum(len(i["turns"]) for i in items)
-    estimate = estimate_cost_usd(model.model, questions * EST_TOKENS_PER_TURN[0], questions * EST_TOKENS_PER_TURN[1])
-    variant = "no_calculator" if args.no_calculator else "calculator"
+    variant = "no_calculator" if args.no_calculator else args.variant
+    tokens_in, tokens_out = EST_TOKENS_PER_TURN[variant]
+    estimate = estimate_cost_usd(model.model, questions * tokens_in, questions * tokens_out)
     print(f"[eval] {len(items)} items, {questions} questions | model={model.model} | variant={variant} | dataset={args.dataset}")
     print("[eval] estimated cost of this run: " + (f"~${estimate:.4f}" if estimate is not None else "n/a (model not in price table)"))
 
     results = []
     for item in items:
-        result = run_item(item, model, calculator=not args.no_calculator)
+        result = run_item(item, model, variant=variant)
         results.append(result)
         print(f"  {item['id']:<10} {'PASS' if result['passed'] else 'FAIL'}  {result['seconds']}s", flush=True)
     tracing.flush()  # eval traces are sent to Langfuse when tracing is on

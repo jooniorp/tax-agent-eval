@@ -6,8 +6,9 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from tax_agent.evaluation.scoring import (
     Run, amounts, answer_match, args_relayed, needs_calculator, says_ineligible, says_not_found,
-    says_unsupported, says_zero, score_item,
+    says_unsupported, says_zero, score_item, specs_for,
 )
+from tax_agent.combined_tools import build_combined_tools
 from tax_agent.mock_api.deduction import CardSpending, calc_card_deduction
 from tax_agent.mock_api.source import MockDataSource
 
@@ -143,6 +144,19 @@ def test_says_unsupported_and_says_not_found():
     assert not says_not_found("카드 소득공제는 530만 원입니다.")
 
 
+def test_wordings_the_first_scoring_rules_missed_are_read_correctly():
+    # Real answers from the 2026-11-14 batch that were scored as failures although they were right.
+    no_tool = "저는 이 질문에 답할 수 없습니다. 교육비 세액공제에 필요한 데이터 조회와 계산 기능이 없습니다. 그래서 금액을 알려드릴 수 없습니다."
+    unknown_user = '"알 수 없는 사용자"라는 오류가 두 번 반환되어 카드 사용 내역을 가져오지 못했습니다.'
+    assert says_unsupported(no_tool) and not says_not_found(no_tool)
+    assert says_not_found(unknown_user)
+    # The combined agent's wording in the second batch: the tool cannot look the topic up.
+    can_not_look_up = "죄송하지만 이 도구로는 **교육비 세액공제 금액을 조회할 수 없습니다.** 현재 조회할 수 있는 항목은 다음 세 가지입니다."
+    assert says_unsupported(can_not_look_up)
+    assert not says_unsupported("월세 세액공제는 조회할 수 있고 금액은 102만 원입니다.")
+    assert not says_unsupported("카드 소득공제는 530만 원이고, 월세 공제도 받을 수 있습니다.")
+
+
 def run_with_answer(answer: str) -> Run:
     messages = [HumanMessage("q"), AIMessage(answer)]
     return Run(messages, [len(messages)])
@@ -209,6 +223,80 @@ def test_the_control_variant_skips_the_checks_that_need_the_calculator():
     assert not needs_calculator({"type": "tool_called", "name": "get_user_profile"})
     assert not needs_calculator({"type": "asks_question", "turn": 1})
     no_calc = Run([HumanMessage("q"), AIMessage("카드 소득공제는 530만 원입니다.")], [2])
-    score = score_item(ITEMS["card-01"], no_calc, calculator=False)
+    score = score_item(ITEMS["card-01"], no_calc, variant="no_calculator")
     assert score.checks == [] and score.passed  # the answer is right and no check applies
-    assert not score_item(ITEMS["card-01"], no_calc, calculator=True).rules_ok  # with the calculator, no tool call fails
+    assert not score_item(ITEMS["card-01"], no_calc, variant="calculator").rules_ok  # with the calculator, no tool call fails
+
+
+# --- the combined agent: one compute_deduction tool instead of profile + data + calculator ---
+
+COMBINED = build_combined_tools(MockDataSource())["compute_deduction"]
+
+
+def combined_ask_back_trail(first_reply: AIMessage, *, compute_in_turn_1: bool) -> Run:
+    """Item ask-01 (user_d, salary not on file) as the combined agent would play it."""
+    missing_args = {"user_id": "user_d", "item": "card"}
+    with_salary = {**missing_args, "gross_salary": 68_000_000}
+    messages = [HumanMessage("카드 소득공제 얼마나 받아?")]
+    if compute_in_turn_1:  # a guess: the salary is made up, the tool computes
+        messages += [AIMessage("", tool_calls=[{"name": "compute_deduction", "args": with_salary, "id": "1"}]),
+                     tool_result("compute_deduction", COMBINED(**with_salary), "1")]
+    else:
+        messages += [AIMessage("", tool_calls=[{"name": "compute_deduction", "args": missing_args, "id": "1"}]),
+                     tool_result("compute_deduction", COMBINED(**missing_args), "1")]
+    messages.append(first_reply)
+    turn_1_end = len(messages)
+    messages += [
+        HumanMessage("총급여는 6,800만원이야."),
+        AIMessage("", tool_calls=[{"name": "compute_deduction", "args": with_salary, "id": "2"}]),
+        tool_result("compute_deduction", COMBINED(**with_salary), "2"),
+        AIMessage("카드 소득공제는 530만 원입니다."),
+    ]
+    return Run(messages, [turn_1_end, len(messages)])
+
+
+def test_specs_for_the_combined_agent_are_rewritten_for_the_single_tool():
+    specs = specs_for(ITEMS["ask-01"]["checks"], "combined")
+    kinds = [(s["type"], s.get("name"), s.get("turn")) for s in specs]
+    assert ("tool_called", "compute_deduction", 1) in kinds  # looking the user up is part of that call
+    assert ("no_deduction_result", None, 1) in kinds and ("tool_not_called", "calc_deduction", 1) not in kinds
+    assert specs_for([{"type": "tool_order"}, {"type": "args_relayed"}], "combined") == []  # no steps to order or pass on
+
+
+def test_the_combined_agent_passes_when_it_asks_first_and_computes_after_the_answer():
+    run = combined_ask_back_trail(AIMessage("총급여가 얼마인지 알려주세요."), compute_in_turn_1=False)
+    score = score_item(ITEMS["ask-01"], run, variant="combined")
+    assert score.passed, [c for c in score.checks if not c.ok]
+
+
+def test_the_combined_agent_fails_when_it_computes_with_a_guessed_salary():
+    run = combined_ask_back_trail(AIMessage("카드 소득공제는 530만 원입니다."), compute_in_turn_1=True)
+    failed = [c.name for c in score_item(ITEMS["ask-01"], run, variant="combined").checks if not c.ok]
+    assert "no_deduction_result@turn1" in failed and "asks_question@turn1" in failed
+
+
+def test_the_thousand_unit_and_the_wordings_the_openai_model_used_are_read():
+    # Real answers from the 2026-11-18 model comparison that were scored as failures although they were right.
+    assert amounts("의료비 세액공제액은 37만 5천 원입니다") == {375_000}
+    assert amounts("총급여 5천만 원, 공제 3천 원") == {50_000_000, 3_000}
+    assert amounts("1억 2천만 원과 5,300,000원") == {120_000_000, 5_300_000}
+    assert amounts("2025년에 3개월 동안 천천히") == set()
+    refusals = ("교육비 세액공제는 현재 조회할 수 없어 공제액을 확인해 드릴 수 없어요.",
+                "교육비 세액공제 금액을 조회할 수 없어, 얼마를 공제받는지 확인해 드릴 수 없어요.",
+                "교육비 세액공제액은 확인해 드릴 수 없어요.")
+    assert all(says_unsupported(text) for text in refusals)
+    assert not says_unsupported("카드 소득공제는 530만 원이고 월세 공제도 계산해 드릴 수 있어요.")
+
+
+def test_an_explanation_that_says_the_money_was_given_back_counts_as_mentioning_the_insurance_payout():
+    answer = "병원비 120만 원에서 돌려받은 30만 원을 빼면 실제 부담액은 90만 원이고, 총급여의 3%인 150만 원을 넘지 않아 0원이에요."
+    run = Run([HumanMessage("q"), AIMessage(answer)], [2])
+    failed = [c.name for c in score_item(ITEMS["med-01"], run, variant="no_calculator").checks if not c.ok]
+    assert failed == []
+
+
+def test_zero_and_ineligible_wordings_seen_in_the_simulated_users_run():
+    # Real answer of 2026-11-18 (sim-agent): right, but the first rules did not read it as "no deduction".
+    answer = "올해 월세 세액공제는 해당이 없어서 받을 수 있는 금액이 없습니다. 이유는 무주택 세대주가 아니기 때문입니다."
+    assert says_zero(answer) and says_ineligible(answer)
+    assert not says_zero("월세 세액공제는 1,020,000원입니다.") and not says_ineligible("월세 세액공제는 1,020,000원입니다.")

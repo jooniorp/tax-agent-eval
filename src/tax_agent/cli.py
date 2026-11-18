@@ -10,7 +10,7 @@ import time
 from langchain_core.messages import AIMessage, BaseMessage
 
 from tax_agent import tracing
-from tax_agent.agent import ask, build_agent, token_totals
+from tax_agent.agent import DEFAULT_VARIANT, VARIANTS, ask, build_agent, token_totals
 from tax_agent.llm import estimate_cost_usd, get_model
 from tax_agent.mock_api.source import MockDataSource
 
@@ -30,11 +30,13 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("question")
     parser.add_argument("--user", default="user_a", help="fictional taxpayer id (default: user_a)")
     parser.add_argument("--model", help="model id; default: TAX_AGENT_MODEL or the built-in default")
+    parser.add_argument("--variant", choices=VARIANTS, default=DEFAULT_VARIANT,
+                        help=f"which agent to run (default: {DEFAULT_VARIANT}); 'calculator' shows the step-by-step tool calls")
     args = parser.parse_args(argv)
     sys.stdout.reconfigure(errors="replace")  # a piped Windows console may not encode every character
 
     model = get_model(args.model)
-    agent = build_agent(MockDataSource(), args.user, model=model)
+    agent = build_agent(MockDataSource(), args.user, model=model, variant=args.variant)
     started = time.perf_counter()
     with tracing.trace("tax-agent", user_id=args.user) as callbacks:
         messages = ask(agent, args.question, callbacks=callbacks)

@@ -40,6 +40,8 @@ _PROFILES = {
     "user_w": UserProfile("user_w", 55_000_001, homeless_household_head=True),  # rent, 15% rate one won above it
     "user_x": UserProfile("user_x", 38_420_000),  # medical, odd amounts and payouts in both groups
     "user_y": UserProfile("user_y", 29_999_999),  # medical, threshold needs rounding down, 7M cap bites
+    # Length sweep (fourth round): the same salary and the same total card spending, split over 1..6 categories
+    **{f"user_sw{k}": UserProfile(f"user_sw{k}", 40_000_000) for k in range(1, 7)},
 }
 
 _CARD_SPENDING = {
@@ -63,6 +65,17 @@ _CARD_SPENDING = {
     ("user_u", 2025): CardSpending(
         credit=21_576_430, debit=9_842_170, cash_receipt=4_310_260, market=3_127_850, transit=2_486_390,
         culture=1_174_300,
+    ),
+    # Total 15,271,830 in every case; the deduction stays under the cap so each category matters.
+    ("user_sw1", 2025): CardSpending(credit=15_271_830),
+    ("user_sw2", 2025): CardSpending(credit=8_312_450, debit=6_959_380),
+    ("user_sw3", 2025): CardSpending(credit=6_483_170, debit=5_026_540, cash_receipt=3_762_120),
+    ("user_sw4", 2025): CardSpending(credit=5_478_260, debit=3_874_910, cash_receipt=3_081_420, market=2_837_240),
+    ("user_sw5", 2025): CardSpending(
+        credit=4_792_350, debit=3_541_680, cash_receipt=2_736_190, market=2_425_310, transit=1_776_300
+    ),
+    ("user_sw6", 2025): CardSpending(
+        credit=4_117_640, debit=3_098_520, cash_receipt=2_398_760, market=1_986_130, transit=1_551_470, culture=2_119_310
     ),
 }
 

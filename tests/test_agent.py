@@ -1,5 +1,6 @@
 from dataclasses import asdict
 
+import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 from pydantic import Field
@@ -31,7 +32,7 @@ def call(name: str, args: dict, call_id: str) -> AIMessage:
 
 def run(script: list, question: str = "카드 공제 얼마야?"):
     model = ScriptedModel(messages=iter(script))
-    agent = build_agent(MockDataSource(), "user_a", model=model)
+    agent = build_agent(MockDataSource(), "user_a", model=model, variant="calculator")  # the step-by-step agent
     return model, ask(agent, question)
 
 
@@ -62,13 +63,13 @@ def test_tool_errors_go_back_to_the_model_instead_of_crashing():
 
 def test_the_control_agent_has_no_calculator_tool_and_the_rules_in_its_prompt():
     control = ScriptedModel(messages=iter([AIMessage(content="ok")]))
-    ask(build_agent(MockDataSource(), "user_a", model=control, calculator=False), "hi")
+    ask(build_agent(MockDataSource(), "user_a", model=control, variant="no_calculator"), "hi")
     assert "calc_deduction" not in control.bound and "get_card_spending" in control.bound
     system = control.seen[0][0].content
     assert "There is no calculator tool" in system and "Minimum usage = 25%" in system
 
     normal = ScriptedModel(messages=iter([AIMessage(content="ok")]))
-    ask(build_agent(MockDataSource(), "user_a", model=normal), "hi")
+    ask(build_agent(MockDataSource(), "user_a", model=normal, variant="calculator"), "hi")
     assert "calc_deduction" in normal.bound
     assert "Minimum usage" not in normal.seen[0][0].content  # the normal agent is not given the rules
 
@@ -80,3 +81,38 @@ def test_model_name_priority(monkeypatch):
     monkeypatch.setenv("TAX_AGENT_MODEL", "from-env")
     assert get_model().model == "from-env"
     assert get_model("from-arg").model == "from-arg"
+
+
+def test_the_combined_agent_has_one_tool_and_answers_after_one_tool_round():
+    model = ScriptedModel(messages=iter([
+        call("compute_deduction", {"user_id": "user_a", "item": "card"}, "1"),
+        AIMessage(content="카드 소득공제는 530만 원입니다."),
+    ]))
+    messages = ask(build_agent(MockDataSource(), "user_a", model=model, variant="combined"), "카드 공제 얼마야?")
+    assert model.bound == ["compute_deduction"]
+    assert "compute_deduction" in model.seen[0][0].content and "get_user_profile" not in model.seen[0][0].content
+    assert "5300000" in next(m for m in messages if isinstance(m, ToolMessage)).content
+    assert len(model.seen) == 2  # two model calls: ask for the tool, explain the result
+
+
+def test_an_unknown_variant_is_refused():
+    with pytest.raises(ValueError):
+        build_agent(MockDataSource(), "user_a", model=ScriptedModel(messages=iter([])), variant="fast")
+
+
+def test_the_default_agent_is_the_combined_one():
+    model = ScriptedModel(messages=iter([AIMessage(content="ok")]))
+    ask(build_agent(MockDataSource(), "user_a", model=model), "hi")
+    assert model.bound == ["compute_deduction"]
+
+
+def test_a_provider_prefix_picks_the_openai_client_and_keeps_the_bare_id(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-real")  # constructing the client makes no request
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("TAX_AGENT_MODEL", "")
+    model = get_model("openai:some-model")
+    assert type(model).__name__ == "ChatOpenAI" and model.model == "some-model"  # the bare id is what results record
+    assert type(get_model("anthropic:claude-haiku-5-5")).__name__ == "ChatAnthropic"
+    assert type(get_model("claude-haiku-5-5")).__name__ == "ChatAnthropic"
+    with pytest.raises(ValueError):
+        get_model("someone-else:some-model")

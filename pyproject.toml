@@ -10,6 +10,7 @@ requires-python = ">=3.10"
 dependencies = [
     "langchain>=1.4.9",
     "langchain-anthropic>=1.7.10",
+    "langchain-openai>=1.7.4",
     "langfuse>=4.18.0",
     "langgraph>=1.2.20",
     "python-dotenv>=1.2.4",
@@ -18,6 +19,7 @@ dependencies = [
 [project.scripts]
 tax-agent = "tax_agent.cli:main"
 eval = "tax_agent.evaluation.runner:main"
+eval-compare = "tax_agent.evaluation.compare:main"
 
 [build-system]
 requires = ["hatchling"]
